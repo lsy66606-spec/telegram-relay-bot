@@ -91,7 +91,7 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error(f"更新 {update} 导致错误 {context.error}")
 
-# --- 主函数（修复缩进错误） ---
+# --- 主函数（修复app作用域问题） ---
 def main() -> None:
     application = Application.builder().token(BOT_TOKEN).build()
     
@@ -104,7 +104,7 @@ def main() -> None:
     ))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user_message))
 
-    # 创建Flask应用
+    # 创建Flask应用（在函数内部定义）
     app = Flask(__name__)
 
     @app.route('/webhook', methods=['POST'])
@@ -122,14 +122,16 @@ def main() -> None:
     loop = asyncio.get_event_loop()
     loop.run_until_complete(setup_webhook())
     
-# 修复缩进：确保这行代码与上面的代码在同一缩进级别
-app.run(host='0.0.0.0', port=PORT)  # host必须为0.0.0.0，Render才能访问
+    # 修复：在main()函数内部启动Flask服务（app的作用域内）
+    app.run(host='0.0.0.0', port=PORT)  # 这行代码必须放在main()函数内部
 
 if __name__ == "__main__":
-    main()
+    main()  # 调用main()函数，内部会启动app
     
     
     
+    
+
 
 
 
