@@ -130,11 +130,13 @@ def main() -> None:
         logger.info(f"Webhook已设置为：{WEBHOOK_URL}/webhook")
 
     # 6. 先执行Webhook设置，再启动Flask服务（监听Render的端口）
-    application.loop.run_until_complete(setup_webhook())
+    loop = asyncio.get_event_loop()
+loop.run_until_complete(setup_webhook())
     app.run(host='0.0.0.0', port=PORT)  # host必须为0.0.0.0，Render才能访问
 
 if __name__ == "__main__":
     main()
     
     
+
 
