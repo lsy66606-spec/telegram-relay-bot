@@ -5,6 +5,8 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.helpers import escape_markdown
 from flask import Flask, request
+# 新增：导入Flask异步运行所需的函数
+from flask.helpers import run_simple
 
 # --- 配置 ---
 BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -30,7 +32,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- 命令/消息处理函数 ---
+# --- 命令/消息处理函数（不变） ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("你好！你可以直接在这里给我发送消息，我会将它转达给管理员。")
 
@@ -91,8 +93,9 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error(f"更新 {update} 导致错误 {context.error}")
 
-# --- 主函数（修复app作用域问题） ---
-def main() -> None:
+# --- 主函数（修复两个核心问题） ---
+async def main_async() -> None:
+    # 1. 创建Telegram Application
     application = Application.builder().token(BOT_TOKEN).build()
     
     # 添加处理器
@@ -104,33 +107,38 @@ def main() -> None:
     ))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user_message))
 
-    # 创建Flask应用（在函数内部定义）
+    # 2. 创建Flask应用（支持异步）
     app = Flask(__name__)
 
+    # 异步Webhook视图函数（现在依赖已满足，可正常运行）
     @app.route('/webhook', methods=['POST'])
     async def webhook() -> str:
         update = Update.de_json(request.get_json(force=True), application.bot)
         await application.process_update(update)
         return "ok"
 
-    # 设置Webhook
-    async def setup_webhook():
-        await application.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
-        logger.info(f"Webhook已设置为：{WEBHOOK_URL}/webhook")
+    # 3. 设置Telegram Webhook（异步执行，避免事件循环警告）
+    await application.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
+    logger.info(f"Webhook已设置为：{WEBHOOK_URL}/webhook")
 
-    # 使用asyncio的事件循环执行setup_webhook
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(setup_webhook())
-    
-    # 修复：在main()函数内部启动Flask服务（app的作用域内）
-    app.run(host='0.0.0.0', port=PORT)  # 这行代码必须放在main()函数内部
+    # 4. 用Flask的run_simple启动服务（支持异步，替代原来的app.run）
+    # 注意：use_reloader=False（避免开发环境自动重载导致重复启动）
+    run_simple(
+        host='0.0.0.0',
+        port=PORT,
+        application=app,
+        use_reloader=False,
+        use_debugger=False
+    )
 
 if __name__ == "__main__":
-    main()  # 调用main()函数，内部会启动app
+    # 修复：用asyncio.run()启动异步主函数，替代弃用的get_event_loop()
+    asyncio.run(main_async())
     
     
     
     
+
 
 
 
