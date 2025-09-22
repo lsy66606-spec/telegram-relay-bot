@@ -5,10 +5,9 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.helpers import escape_markdown
 from flask import Flask, request
-# 新增：导入同步包装所需的函数
 from asyncio import run as asyncio_run
 
-# --- 配置（确保环境变量正确读取） ---
+# --- 配置 ---
 BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 ADMIN_CHAT_ID = os.getenv('TELEGRAM_ADMIN_CHAT_ID')
 PORT = int(os.getenv('PORT', 5000))
@@ -32,10 +31,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- 1. 先初始化Telegram Application（全局单例，避免重复创建） ---
+# --- 1. 初始化Telegram Application + 关键添加：初始化操作 ---
 application = Application.builder().token(BOT_TOKEN).build()
+# 新增：初始化Application（必须调用，否则无法处理消息）
+loop = asyncio.get_event_loop()
+loop.run_until_complete(application.initialize())  # 初始化
+loop.run_until_complete(application.start())        # 启动Application（加载处理器）
 
-# --- 2. 消息处理函数（不变，复用原有逻辑） ---
+# --- 2. 消息处理函数（不变） ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("你好！你可以直接在这里给我发送消息，我会将它转达给管理员。")
 
@@ -96,7 +99,7 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error(f"更新 {update} 导致错误 {context.error}")
 
-# --- 3. 添加处理器到Telegram Application（全局初始化时绑定） ---
+# --- 3. 添加处理器到Application（不变） ---
 application.add_error_handler(error_handler)
 application.add_handler(CommandHandler("start", start_command))
 application.add_handler(MessageHandler(
@@ -105,42 +108,37 @@ application.add_handler(MessageHandler(
 ))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user_message))
 
-# --- 4. Flask同步视图（关键：用同步函数包装异步的Telegram逻辑） ---
+# --- 4. Flask同步Webhook视图（不变） ---
 app = Flask(__name__)
 
-# 同步Webhook视图：内部调用异步的process_update
 @app.route('/webhook', methods=['POST'])
 def webhook_sync() -> str:
     try:
-        # 1. 解析Telegram的POST请求数据
         update_data = request.get_json(force=True)
-        # 2. 转换为Telegram的Update对象
         update = Update.de_json(update_data, application.bot)
-        # 3. 用asyncio.run同步执行异步的process_update（核心修复）
-        asyncio_run(application.process_update(update))
-        return "ok"  # 必须返回"ok"给Telegram，避免重复推送
+        asyncio_run(application.process_update(update))  # 处理消息
+        return "ok"
     except Exception as e:
         logger.error(f"Webhook处理失败: {str(e)}")
         return "error", 500
 
-# --- 5. 主函数：先设置Webhook，再启动Flask同步服务 ---
+# --- 5. 主函数：设置Webhook + 启动Flask（不变） ---
 def main() -> None:
-    # 同步执行Webhook设置（避免异步循环冲突）
+    # 设置Webhook
     loop = asyncio.get_event_loop()
     loop.run_until_complete(application.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook"))
     logger.info(f"Webhook已设置为：{WEBHOOK_URL}/webhook")
 
-    # 启动Flask同步服务（无async_mode参数，适配Flask 2.3.3）
+    # 启动Flask服务
     app.run(
-        host='0.0.0.0',  # 必须是0.0.0.0，Render才能访问
-        port=PORT,       # 读取Render分配的动态端口
-        use_reloader=False,  # 关闭自动重载，避免重复启动
-        debug=False          # 生产环境关闭调试模式
+        host='0.0.0.0',
+        port=PORT,
+        use_reloader=False,
+        debug=False
     )
 
 if __name__ == "__main__":
-    main()  # 直接启动同步主函数，无需asyncio.run
-    
+    main()
 
 
 
