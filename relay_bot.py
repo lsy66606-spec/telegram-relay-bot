@@ -1,88 +1,73 @@
 import logging
-import os  # 导入os模块用于读取环境变量
+import os
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.helpers import escape_markdown
+# 新增：导入Flask（用于创建HTTP服务，Render支持）
+from flask import Flask, request
 
-# --- 从环境变量获取配置 ---
-BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')  # 从环境变量获取机器人令牌
-ADMIN_CHAT_ID = os.getenv('TELEGRAM_ADMIN_CHAT_ID')  # 从环境变量获取管理员Chat ID
+# --- 核心配置（新增+修改） ---
+BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+ADMIN_CHAT_ID = os.getenv('TELEGRAM_ADMIN_CHAT_ID')
+# 1. 读取Render分配的动态端口（必须）
+PORT = int(os.getenv('PORT', 5000))
+# 2. 配置Webhook URL（需替换为你的Render服务域名，格式：https://xxx.onrender.com）
+WEBHOOK_URL = os.getenv('WEBHOOK_URL')  # 后续在Render设为环境变量
 
-# 检查是否成功获取环境变量
-if not BOT_TOKEN or not ADMIN_CHAT_ID:
-    print("错误：请先设置 TELEGRAM_BOT_TOKEN 和 TELEGRAM_ADMIN_CHAT_ID 环境变量！")
+if not BOT_TOKEN or not ADMIN_CHAT_ID or not WEBHOOK_URL:
+    print("错误：请设置 TELEGRAM_BOT_TOKEN、TELEGRAM_ADMIN_CHAT_ID、WEBHOOK_URL 环境变量！")
     exit(1)
 
-# 将ADMIN_CHAT_ID转换为整数
 try:
     ADMIN_CHAT_ID = int(ADMIN_CHAT_ID)
 except ValueError:
     print("错误：TELEGRAM_ADMIN_CHAT_ID 必须是整数！")
     exit(1)
-# --- 配置区结束 ---
 
-# 使用全局字典存储消息ID与用户ID的关联
+# --- 全局变量与日志（不变） ---
 message_user_map = {}
-
-# 设置日志记录
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-
+# --- 命令/消息处理函数（完全不变） ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """处理 /start 命令，给用户发送欢迎消息"""
     await update.message.reply_text("你好！你可以直接在这里给我发送消息，我会将它转达给管理员。")
 
-
 async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """处理所有来自普通用户的消息，并将其转发给管理员"""
     global message_user_map
-    
     user_id = update.effective_user.id
     user_name = update.effective_user.first_name
     message_id = update.message.message_id
 
-    # 忽略来自管理员自己的消息，避免自己给自己转发
     if user_id == ADMIN_CHAT_ID:
         return
 
     logger.info(f"收到用户 {user_id} 的消息 (消息ID: {message_id})")
-
-    # 对用户名和用户ID进行Markdown转义处理
     escaped_name = escape_markdown(user_name, version=2)
     escaped_user_id = escape_markdown(str(user_id), version=2)
     
-    # 构造头部信息
     header = f"📩 收到来自用户 {escaped_name} \\(ID: `{escaped_user_id}`\\) 的新消息："
-    # 发送带用户ID的头部信息
     header_msg = await context.bot.send_message(
         chat_id=ADMIN_CHAT_ID, 
         text=header, 
         parse_mode='MarkdownV2'
     )
 
-    # 转发原始消息
     forwarded = await context.bot.forward_message(
         chat_id=ADMIN_CHAT_ID,
         from_chat_id=update.message.chat_id,
         message_id=message_id
     )
     
-    # 将用户ID存储在全局字典中，同时关联头部消息和转发消息的ID
     message_user_map[header_msg.message_id] = user_id
     message_user_map[forwarded.message_id] = user_id
-    
     logger.info(f"已转发消息，头部消息ID: {header_msg.message_id}, 转发消息ID: {forwarded.message_id}")
-    logger.info(f"当前关联映射: {message_user_map}")
-
 
 async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """处理管理员的回复消息，并将其发送给原始用户"""
     global message_user_map
-    
     if update.effective_user.id != ADMIN_CHAT_ID:
         return
         
@@ -90,19 +75,13 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("⚠️ 请先回复一条消息")
         return
         
-    replied_message = update.message.reply_to_message
-    replied_message_id = replied_message.message_id
-    
+    replied_message_id = update.message.reply_to_message.message_id
     logger.info(f"管理员回复了消息ID: {replied_message_id}")
-    logger.info(f"当前关联映射: {message_user_map}")
     
-    # 从全局字典中获取原始用户ID
     original_user_id = message_user_map.get(replied_message_id)
-    
     if original_user_id:
         if update.message.text:
             try:
-                # 直接发送管理员的回复内容，不添加前缀文字
                 await context.bot.send_message(
                     chat_id=original_user_id,
                     text=f"{update.message.text}"
@@ -116,18 +95,16 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("⚠️ 请直接 '回复' 由机器人转发的用户消息来进行沟通。")
         logger.warning(f"未找到与消息ID {replied_message_id} 关联的用户")
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.error(f"更新 {update} 导致错误 {context.error}")
 
+# --- 核心改动：用Webhook替换Polling，添加Flask HTTP服务 ---
 def main() -> None:
-    """启动机器人"""
+    # 1. 创建Telegram Application
     application = Application.builder().token(BOT_TOKEN).build()
-
-    # 添加错误处理器
-    async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """处理所有错误"""
-        logger.error(f"更新 {update} 导致错误 {context.error}")
-
+    
+    # 2. 添加所有处理器（不变）
     application.add_error_handler(error_handler)
-
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(MessageHandler(
         filters.TEXT & filters.REPLY & filters.User(user_id=ADMIN_CHAT_ID),
@@ -135,12 +112,29 @@ def main() -> None:
     ))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user_message))
 
-    print("机器人已启动，等待消息...")
-    application.run_polling()
+    # 3. 创建Flask实例（用于监听Render的端口）
+    app = Flask(__name__)
 
+    # 4. 定义Webhook接口：Telegram会向这个路径发送消息请求
+    @app.route('/webhook', methods=['POST'])
+    async def webhook() -> str:
+        # 将HTTP请求解析为Telegram Update对象
+        update = Update.de_json(request.get_json(force=True), application.bot)
+        # 处理Update
+        await application.process_update(update)
+        return "ok"  # 必须返回"ok"给Telegram，否则会重复发送
+
+    # 5. 启动前设置Webhook（告诉Telegram：往哪个URL发消息）
+    async def setup_webhook():
+        await application.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
+        logger.info(f"Webhook已设置为：{WEBHOOK_URL}/webhook")
+
+    # 6. 先执行Webhook设置，再启动Flask服务（监听Render的端口）
+    application.loop.run_until_complete(setup_webhook())
+    app.run(host='0.0.0.0', port=PORT)  # host必须为0.0.0.0，Render才能访问
 
 if __name__ == "__main__":
     main()
     
     
-    
+
